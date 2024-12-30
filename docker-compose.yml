@@ -1,0 +1,27 @@
+version: "3.8"
+
+networks:
+  custom-bridge-network:
+    driver: bridge
+
+services:
+  java-app:
+    build: .
+    image: image
+    container_name: java-app-container
+    restart: always
+    environment:
+      DISPLAY: 192.168.192.1:0  # Use the host's DISPLAY variable
+    networks:
+      - custom-bridge-network
+
+  java-app2:
+    build: .
+    image: image
+    container_name: java-app2-container
+    restart: always
+    environment:
+      DISPLAY: 192.168.192.1:0 # Use the host's DISPLAY variable
+    networks:
+      - custom-bridge-network
+
