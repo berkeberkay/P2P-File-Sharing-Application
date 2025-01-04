@@ -1,10 +1,19 @@
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.io.File;
 
 public class GUI {
     private JFrame frame;
-
     private GeneralManager generalManager;
+
+    DefaultListModel<String> foundFilesListModel ;// Liste modeli
+    JList<String> foundFilesList ;
+
+    DefaultListModel<String> downloadingListModel ;// Liste modeli
+    JList<String> downloadingList ;
+
 
     public GUI() {
         initialize();
@@ -166,8 +175,8 @@ public class GUI {
         downloadingPanel.setBackground(creamColor);
 
 // Liste modeli ve JList oluşturma
-        DefaultListModel<String> downloadingListModel = new DefaultListModel<>();
-        JList<String> downloadingList = new JList<>(downloadingListModel);
+        downloadingListModel = new DefaultListModel<>();
+        downloadingList = new JList<>(downloadingListModel);
         downloadingList.setBackground(Color.WHITE);
 
 // Listeye kaydırma çubuğu ekleme
@@ -177,16 +186,17 @@ public class GUI {
 // Found files container (Listeye Çevrildi)
         JPanel foundFilesPanel = new JPanel(new BorderLayout());
         foundFilesPanel.setBorder(BorderFactory.createTitledBorder("Found files"));
-        foundFilesPanel.setBackground(creamColor);
+        foundFilesPanel.setBackground(new Color(236, 233, 216));
 
-// Liste modeli ve JList oluşturma
-        DefaultListModel<String> foundFilesListModel = new DefaultListModel<>();
-        JList<String> foundFilesList = new JList<>(foundFilesListModel);
+        foundFilesListModel = new DefaultListModel<>(); // Liste modeli
+        foundFilesList = new JList<>(foundFilesListModel); // JList
         foundFilesList.setBackground(Color.WHITE);
 
-// Listeye kaydırma çubuğu ekleme
-        foundFilesPanel.add(new JScrollPane(foundFilesList), BorderLayout.CENTER);
-        foundFilesPanel.setPreferredSize(new Dimension(500, 150)); // Orijinal boyut korunuyor
+        // Listeye kaydırma çubuğu ekleme
+        JScrollPane foundFilesScrollPane = new JScrollPane(foundFilesList);
+        foundFilesPanel.add(foundFilesScrollPane, BorderLayout.CENTER);
+        foundFilesPanel.setPreferredSize(new Dimension(500, 150)); // Boyut ayarı
+
 
 
         // Search area (bottom panel)
@@ -218,13 +228,114 @@ public class GUI {
         frame.add(mainPanel, BorderLayout.CENTER);
         frame.add(bottomPanel, BorderLayout.SOUTH);
 
-        rootButton.addActionListener(e -> {
-            String input = rootTextField.getText();
-            if( input.isEmpty()){
-                JOptionPane.showMessageDialog(rootPanel, "Please enter a shared folder");
+        // Event Handlers
+
+        rootTextField.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                JFileChooser fileChooser = new JFileChooser();
+                fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY); // Sadece dizinler seçilebilir
+                int result = fileChooser.showOpenDialog(frame);
+
+                if (result == JFileChooser.APPROVE_OPTION) {
+                    File selectedDirectory = fileChooser.getSelectedFile();
+                    rootTextField.setText(selectedDirectory.getAbsolutePath());
+                    generalManager.updateFoundFilesInGUI();
+                }
             }
-          generalManager.doAction(input);
         });
+
+        rootButton.addActionListener(e -> {
+            if (new File(rootTextField.getText()).isDirectory()) {
+                if (!rootTextField.getText().isEmpty()) {
+                    generalManager.sharedFolderPath(rootTextField.getText());
+                }
+            }
+        });
+
+        destinationTextField.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                JFileChooser fileChooser = new JFileChooser();
+                fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY); // Sadece dizinler seçilebilir
+                int result = fileChooser.showOpenDialog(frame);
+
+                if (result == JFileChooser.APPROVE_OPTION) {
+                    File selectedDirectory = fileChooser.getSelectedFile();
+                    destinationTextField.setText(selectedDirectory.getAbsolutePath());
+                }
+            }
+        });
+
+        destinationButton.addActionListener(e -> {
+            String destPath = destinationTextField.getText();
+            File f = new File(destPath);
+            if (f.isDirectory()) {
+                generalManager.setDestinationFolderPath(destPath);
+            }
+        });
+
+
+        foundFilesList.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 2) { // çift tıklama
+                    int index = foundFilesList.locationToIndex(e.getPoint());
+                    if (index != -1) {
+                        String displayText = foundFilesListModel.getElementAt(index);
+                        // Örn. "deneme.txt (hash=0827a3bc8f5f...)"
+                        String extractedHash = parseHashFromDisplay(displayText);
+                        System.out.println("Downloading file (hash): " + extractedHash);
+
+                        // GeneralManager'da parametre olarak hash gönderelim
+                        generalManager.requestFile(extractedHash);
+                    }
+                }
+            }
+        private String parseHashFromDisplay(String displayText) {
+            // displayText = "deneme.txt (hash=0827a3bc8f5f4dddfb...)"
+            int startIndex = displayText.indexOf("hash=") + 5; // 5 = length("hash=")
+            if (startIndex < 5) {
+                // "hash=" bulunamadı
+                return null;
+            }
+            // Parantez kapandığı yeri bulalım
+            int endIndex = displayText.indexOf(")", startIndex);
+            if (endIndex < 0) {
+                return null;
+            }
+            return displayText.substring(startIndex, endIndex).trim();
+        }
+        });
+
+
+        searchButton.addActionListener(e -> {
+            String searchText = searchField.getText().trim().toLowerCase(); // Arama metni alınır ve küçük harfe dönüştürülür
+
+            if (searchText.isEmpty()) {
+                JOptionPane.showMessageDialog(frame, "Please enter text to search.", "Search Error", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            DefaultListModel<String> model = (DefaultListModel<String>) foundFilesList.getModel();
+            DefaultListModel<String> filteredModel = new DefaultListModel<>();
+
+            // Arama metni ile eşleşen dosyaları filtrele
+            for (int i = 0; i < model.size(); i++) {
+                String fileName = model.get(i).toLowerCase();
+                if (fileName.contains(searchText)) {
+                    filteredModel.addElement(model.get(i));
+                }
+            }
+
+            // Eğer sonuç yoksa uyarı göster
+            if (filteredModel.isEmpty()) {
+                JOptionPane.showMessageDialog(frame, "No files found matching: " + searchText, "Search Results", JOptionPane.INFORMATION_MESSAGE);
+            } else {
+                foundFilesList.setModel(filteredModel); // Filtrelenmiş dosyaları listeye koy
+            }
+        });
+
 
 
     }
@@ -233,7 +344,7 @@ public class GUI {
         frame.setVisible(true);
     }
 
-    public JFrame getirFrame() {
+    public JFrame getFrame() {
         return frame;
     }
 
@@ -241,12 +352,45 @@ public class GUI {
         this.frame = frame;
     }
 
-    public GeneralManager getirGeneralManager() {
+    public GeneralManager getGeneralManager() {
         return generalManager;
     }
 
     public void setGeneralManager(GeneralManager generalManager) {
         this.generalManager = generalManager;
+    }
+
+    public void addFileToFoundFilesList(String fileName) {
+        SwingUtilities.invokeLater(() -> {
+            if (!foundFilesListModel.contains(fileName)) {
+                foundFilesListModel.addElement(fileName); // Yeni dosyayı ekle
+                System.out.println("File added to GUI found files: " + fileName);
+            }
+        });
+    }
+
+    public void clearFoundFilesList() {
+        SwingUtilities.invokeLater(() -> {
+            foundFilesListModel.clear(); // Listeyi temizle
+        });
+    }
+    // GUI.java
+
+
+    public void updateDownloadingFile(FileManager.DownloadStatus ds) {
+        SwingUtilities.invokeLater(() -> {
+            // Find if ds is already in the list by name
+            for (int i = 0; i < downloadingListModel.size(); i++) {
+                String element = downloadingListModel.getElementAt(i);
+                if (element.startsWith(ds.getFileName())) {
+                    // Update the item with the new percentage
+                    downloadingListModel.setElementAt(ds.toString(), i);
+                    return;
+                }
+            }
+            // If not found, add it (this covers the initial 0% case)
+            downloadingListModel.addElement(ds.toString());
+        });
     }
 
 

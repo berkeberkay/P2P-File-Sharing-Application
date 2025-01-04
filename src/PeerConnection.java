@@ -1,26 +1,18 @@
-import java.io.*;
+import java.io.IOException;
 import java.net.*;
-import java.util.*;
+import java.util.List;
 
 public class PeerConnection {
-    private static final int PORT = 9876; // UDP iletişim portu
-    private static final int MAX_PACKETS = 1; // Gönderilen mesaj sayısı sınırı
 
-    private List<String> peerList; // Keşfedilen peer'ların IP adresleri
-    private DatagramSocket socket; // UDP iletişimi için tek bir soket
+    public static final int PORT = 9876;
+    private DatagramSocket socket;
+    private final GeneralManager generalManager;
 
-    // Mesaj türleri için enum
-    private enum MessageType {
-        DISCOVERY_REQUEST,
-        RESPONSE,
-        DISCONNECT
-    }
-
-    public PeerConnection() {
-        peerList = Collections.synchronizedList(new ArrayList<>());
+    public PeerConnection(GeneralManager generalManager) {
+        this.generalManager = generalManager;
         try {
-            socket = new DatagramSocket(PORT); // DatagramSocket başlatılır
-            socket.setBroadcast(true);        // Broadcast ayarı yapılır
+            socket = new DatagramSocket(PORT);
+            socket.setBroadcast(true);
             System.out.println("DatagramSocket successfully initialized on port " + PORT);
         } catch (SocketException e) {
             System.err.println("Error initializing DatagramSocket: " + e.getMessage());
@@ -28,21 +20,13 @@ public class PeerConnection {
         }
     }
 
-    /**
-     * UDP Flood gönderimi başlatır (Discovery Request).
-     */
     public void startFlooding() {
-
-        System.out.println("Starting peer discovery... Local IP : " + getLocalIPAddress() );
-        sendMessage(MessageType.DISCOVERY_REQUEST, "255.255.255.255");
+        // Peer keşfi (Discovery)
+        System.out.println("Starting peer discovery... Local IP : " + getLocalIPAddress());
+        sendMessage("DISCOVERY_REQUEST", "255.255.255.255");
         System.out.println("Discovery request sent");
-
     }
 
-
-    /**
-     * Gelen bağlantıları dinler ve mesajları işler.
-     */
     public void startListening() {
         if (socket == null || socket.isClosed()) {
             System.err.println("DatagramSocket is not initialized or already closed.");
@@ -50,12 +34,7 @@ public class PeerConnection {
         }
 
         new Thread(() -> {
-            if (socket == null || socket.isClosed()) {
-                System.err.println("DatagramSocket is not initialized or already closed.");
-                return;
-            }
-
-            System.out.println("Listening for incoming connections...");
+            System.out.println("Listening for incoming connections (UDP)...");
             try {
                 byte[] buffer = new byte[1024];
                 while (true) {
@@ -73,106 +52,93 @@ public class PeerConnection {
         }).start();
     }
 
-
-    /**
-     * Gelen mesajı işler.
-     *
-     * @param message       Gelen mesaj
-     * @param senderAddress Mesajı gönderen peer'ın adresi
-     */
     private void handleIncomingMessage(String message, String senderAddress) {
-
-        String localIPAddress = getLocalIPAddress(); // Yerel IP adresini alın
-
-        // Kendine gelen mesajları işlememek için kontrol
+        String localIPAddress = getLocalIPAddress();
         if (localIPAddress != null && localIPAddress.equals(senderAddress)) {
             return; // Kendi IP'sinden gelen mesajı yok say
         }
 
-        System.out.println("Message received: " + message + " from " + senderAddress);
+        String[] parts = message.split("\\|");
+        String messageType = parts[0];
 
-        if (message.equals("DISCOVERY_REQUEST")) {
-            // Gönderen peer'ı peerList'e ekle
-            if (!peerList.contains(senderAddress)) {
-                peerList.add(senderAddress);
-                System.out.println("New peer discovered: " + senderAddress);
+        switch (messageType) {
+            case "DISCOVERY_REQUEST" -> {
+                // Peer keşfi
+                generalManager.addPeer(senderAddress);
+                sendMessage("RESPONSE", senderAddress);
             }
-
-        } else if (message.equals("DISCONNECT")) {
-            // Disconnect mesajı alındığında peer'ı listeden çıkar
-            peerList.remove(senderAddress);
-            System.out.println("Peer disconnected: " + senderAddress);
-        } else if (message.equals("FILE_ANNOUNCE")) {
-            // Format :  FILE_ANNOUNCE|fileName|
+            case "RESPONSE" -> {
+                // Peer keşfi cevabı
+                generalManager.addPeer(senderAddress);
+            }
+            case "DISCONNECT" -> {
+                // Peer ayrılıyor
+                generalManager.removePeer(senderAddress);
+                System.out.println("Peer disconnected: " + senderAddress);
+            }
+            case "FILE_ANNOUNCEMENT" -> {
+                // "FILE_ANNOUNCEMENT|<fileHash>|<fileName>"
+                if (parts.length < 3) {
+                    System.err.println("Invalid FILE_ANNOUNCEMENT message format: " + message);
+                    return;
+                }
+                String fileHash = parts[1];
+                String fileName = parts[2];
+                generalManager.saveFoundFile(fileHash, fileName);
+            }
+            default -> {
+                System.err.println("Unknown UDP message type received: " + message);
+            }
         }
-
-        System.out.println(peerList);
-
     }
 
-    /**
-     * Genel mesaj gönderme metodu.
-     *
-     * @param type    Mesaj türü
-     * @param address Hedef adres
-     */
-    private void sendMessage(MessageType type, String address) {
+    public void sendMessage(String messageType, String address, String... args) {
         if (socket == null || socket.isClosed()) {
             System.err.println("DatagramSocket is not initialized or already closed.");
             return;
         }
 
         try {
-            String message = switch (type) {
-                case DISCOVERY_REQUEST -> "DISCOVERY_REQUEST";
-                case RESPONSE -> "RESPONSE";
-                case DISCONNECT -> "DISCONNECT";
-            };
+            StringBuilder messageBuilder = new StringBuilder(messageType);
+            for (String arg : args) {
+                messageBuilder.append("|").append(arg);
+            }
+            String fullMessage = messageBuilder.toString();
 
-            byte[] buffer = message.getBytes();
+            byte[] buffer = fullMessage.getBytes();
             InetAddress targetAddress = InetAddress.getByName(address);
 
             DatagramPacket packet = new DatagramPacket(buffer, buffer.length, targetAddress, PORT);
+            socket.send(packet);
 
-            // Paket gönder
-            for (int i = 0; i < MAX_PACKETS; i++) {
-                socket.send(packet);
-                System.out.println("Packet sent: " + message + " to " + address);
-            }
+            System.out.println("Packet sent (UDP): " + fullMessage + " to " + address);
         } catch (IOException e) {
-            System.err.println("Error sending message: " + e.getMessage());
+            System.err.println("Error sending UDP message: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
     /**
-     * Disconnect olur ve diğer peer'lara bilgi gönderir.
+     * Dosya duyurusu (announce) için kullanabileceğiniz yardımcı metod.
+     * "FILE_ANNOUNCEMENT|<hash>|<filename>"
      */
+    public void sendFileAnnouncement(String fileHash, String fileName, String address) {
+        sendMessage("FILE_ANNOUNCEMENT", address, fileHash, fileName);
+    }
+
     public void disconnect() {
         if (socket == null || socket.isClosed()) {
             System.err.println("DatagramSocket is not initialized or already closed.");
             return;
         }
-
-        System.out.println("Disconnecting from the network...");
-        // Tüm peer'lara DISCONNECT mesajı gönder
-        for (String peer : peerList) {
-            sendMessage(MessageType.DISCONNECT, peer);
+        // Tüm peer'lara DISCONNECT
+        List<String> allPeers = generalManager.peers();
+        for (String peer : allPeers) {
+            sendMessage("DISCONNECT", peer);
         }
-
-        peerList.clear();
+        generalManager.peers().clear();
         System.out.println("Disconnected from the network.");
     }
-
-    /**
-     * Peer listesi döner.
-     *
-     * @return Peer IP listesi
-     */
-    public List<String> getPeerList() {
-        return peerList;
-    }
-
 
     private String getLocalIPAddress() {
         try {
@@ -183,7 +149,4 @@ public class PeerConnection {
             return null;
         }
     }
-
-
-
 }

@@ -19,6 +19,9 @@ WORKDIR /app
 # Copy the Java application jar file to the container
 COPY out/artifacts/p2p2_jar/p2p2.jar /app/p2p2.jar
 
+# container1 altındaki dosyaları kopyala
+COPY container /app/shared_files
+
 # Expose the X11 display environment variable
 ENV DISPLAY=:0
 
