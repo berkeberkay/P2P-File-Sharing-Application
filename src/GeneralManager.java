@@ -1,14 +1,12 @@
 import javax.swing.*;
 import java.io.File;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 public class GeneralManager {
 
     private final GUI gui;
     private final PeerConnection peerConnection;
     private final FileManager fileManager;
-    private final HashUtils hashUtils;
 
     // Paylaşılan klasör, hedef klasör (indirilecek dosyaların gideceği yer)
     private String sharedFolderPath;
@@ -18,6 +16,12 @@ public class GeneralManager {
     private final List<String> peers = new ArrayList<>();
     private final List<String> knownFileHashes = new ArrayList<>();
     private final List<String> knownFileNames = new ArrayList<>();
+    private final Map<String, Integer> knownFiles = new HashMap<>();
+    // Dosyayı kimler paylaşıyor: fileHash -> Set of peer addresses
+    private final Map<String, Set<String>> fileOwnersMap = new HashMap<>();
+    private final Map<String, String> fileNameToHash = new HashMap<>();
+    private static final List<String> excludeMasks = new ArrayList<>();
+    private static final List<String> excludeFolders = new ArrayList<>();
 
     public GeneralManager(GUI gui) {
         this.gui = gui;
@@ -27,7 +31,6 @@ public class GeneralManager {
         this.fileManager = new FileManager();
         // GUI'yi fileManager'a set et
         this.fileManager.setGUI(gui);
-        this.hashUtils = new HashUtils();
     }
 
     // ---------------------------
@@ -45,6 +48,9 @@ public class GeneralManager {
         new Thread(() -> {
             peerConnection.disconnect();
         }).start();
+    }
+    public boolean isConnected() {
+        return !peers.isEmpty(); // Peer listesi boş değilse bağlıdır
     }
 
     public void addPeer(String senderAddress) {
@@ -75,9 +81,35 @@ public class GeneralManager {
     // ---------------------------
     public GeneralManager sharedFolderPath(String path) {
         this.sharedFolderPath = path;
-        fileManager.loadSharedFiles(path);
+        fileManager.loadSharedFiles(path, excludeMasks, excludeFolders);
         announceFiles();
         return this;
+    }
+
+    public void sendExcludeMessage(String type, String value) {
+        for (String peer : peers) {
+            peerConnection.sendExcludeMessage(type, value, peer);
+        }
+    }
+
+    public static void addExcludeMask(String mask) {
+        if (!excludeMasks.contains(mask)) {
+            excludeMasks.add(mask);
+        }
+    }
+
+    public void removeExcludeMask(String mask) {
+        excludeMasks.remove(mask);
+    }
+
+    public static void addExcludeFolder(String folder) {
+        if (!excludeFolders.contains(folder)) {
+            excludeFolders.add(folder);
+        }
+    }
+
+    public static void removeExcludeFolder(String folder) {
+        excludeFolders.remove(folder);
     }
 
     /**
@@ -90,29 +122,39 @@ public class GeneralManager {
             return;
         }
 
-        // fileManager.getSharedFiles() -> hash setini döndürüyor
+        if (peers.isEmpty()) {
+            System.err.println("No peers available to announce files.");
+            return;
+        }
+
         for (String fileHash : fileManager.getSharedFiles()) {
-            // Gerçek dosya ismini bulmak isterseniz "fileManager" içinde bir "hash->file" map'i var
-            // Onu "getFileByHash" gibi bir metotla alıp file.getName() yapabilirsiniz.
-            // Örnek:
-            //   File f = fileManager.getFileByHash(fileHash);
-            //   String fileName = f.getName();
-            // Veya fileName "Unknown" diye set edebilirsiniz,
-            // ama mantıklı olan file.getName()'i duyurmak.
+            File file = fileManager.getFileByHash(fileHash);
+            if (file != null && file.exists()) {
+                String fileName = file.getName();
+                long fileSize = file.length();
+                System.out.println("DEBUG: " + fileName + " size: " + fileSize + " bytes.");
 
-            // Burada basitçe "fileManager"da "getFileNameByHash()" gibi bir fonk olduğunu varsayalım
-            // Onu ekleyelim:
-            File f = fileManager.getFileByHash(fileHash);
-            if (f != null) {
-                String fileName = f.getName();
+                // CHUNK_SIZE = 256 * 1024 (256 KB) olduğunu varsayıyoruz.
+                int totalChunks = (int) Math.ceil((double) fileSize / FileManager.CHUNK_SIZE);
+                System.out.println("DEBUG: totalChunks = " + totalChunks);
 
-                // Tüm peers'e "FILE_ANNOUNCEMENT|hash|filename"
-                for (String p : peers) {
-                    peerConnection.sendFileAnnouncement(fileHash, fileName, p);
+                // "FILE_ANNOUNCEMENT|hash|filename|totalChunks"
+                for (String peer : peers) {
+                    peerConnection.sendFileAnnouncement(
+                            fileHash,
+                            fileName,
+                            String.valueOf(totalChunks),
+                            peer
+                    );
                 }
+            } else {
+                System.err.println("File with hash " + fileHash + " is null or not found on disk.");
             }
         }
     }
+
+
+
 
     // ---------------------------
     // Destination Folder (indirilecek dosyalar)
@@ -128,16 +170,57 @@ public class GeneralManager {
     /**
      * GUI'den çift tıklamada: "requestFile(hash, targetPeer)"
      */
-    public void requestFile(String fileHash) {
-        if (peers.isEmpty()) {
-            System.err.println("No peers available.");
+    public void requestFile(String fileHash, int totalChunks) {
+        // 1) Bu dosyayı paylaşan peer'ları bul
+        Set<String> owners = fileOwnersMap.get(fileHash);
+        if (owners == null || owners.isEmpty()) {
+            System.err.println("No peers own this file: " + fileHash);
             return;
         }
-        //bağlantı kurulan bütün peerlara dosya isteği gönderilir
-        for (String p : peers) {
-            fileManager.requestFile(fileHash, p);
+
+        List<String> ownersList = new ArrayList<>(owners);
+        String fileName = getFileNameByHash(fileHash);
+        // Artık round-robin'i ownersList üzerinde yapacağız, "peers" değil.
+
+        // 2) DownloadStatus ve benzeri GUI hazırlığı...
+        long totalSize = (long) totalChunks * FileManager.CHUNK_SIZE;
+        FileManager.DownloadStatus ds = fileManager.new DownloadStatus(fileName + "_merged", totalSize);
+        gui.updateDownloadingFile(ds);
+
+        // 3) Thread’ler veya basit for döngüsü
+        List<Thread> downloadThreads = new ArrayList<>();
+        for (int chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+            // Round-robin: chunkIndex'e göre ownersList seç
+            String targetPeer = ownersList.get(chunkIndex % ownersList.size());
+            int finalChunkIndex = chunkIndex;
+
+            Thread downloadThread = new Thread(() -> {
+                int downloadedBytes = fileManager.requestChunk(fileHash, finalChunkIndex, targetPeer);
+                if (downloadedBytes > 0) {
+                    ds.addDownloadedBytes(downloadedBytes);
+                    gui.updateDownloadingFile(ds);
+                }
+            });
+            downloadThreads.add(downloadThread);
+            downloadThread.start();
         }
+
+        // 4) Join
+        for (Thread thread : downloadThreads) {
+            try {
+                thread.join();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+        // 5) mergeChunks
+        fileManager.mergeChunks(fileHash, totalChunks);
     }
+
+
+
+
+
 
     // ---------------------------
     // Found Files Kaydı (GUI'ye ekleme)
@@ -145,24 +228,33 @@ public class GeneralManager {
     /**
      * "FILE_ANNOUNCEMENT|<fileHash>|<fileName>" mesajını alınca çağrılır
      */
-    public void saveFoundFile(String fileHash, String fileName) {
-        // Listeye eklemeden önce, GUI’de göstereceğimiz stringi oluşturalım:
-        String displayText = fileName + " (hash=" + fileHash + ")";
-
-        // GUI metodu
-        gui.addFileToFoundFilesList(displayText);
-
-        System.out.println("Known file hashes: " + fileHash);
+    public void saveFoundFile(String fileHash, String fileName, int totalChunks) {
+        knownFiles.put(fileHash, totalChunks);
+        fileNameToHash.put(fileName, fileHash); // dosya adından hash'e gidelim
+        gui.addFileToFoundFilesList(fileName);
     }
+
+    public void addFileOwner(String fileHash, String ownerPeer) {
+        fileOwnersMap.putIfAbsent(fileHash, new HashSet<>());
+        fileOwnersMap.get(fileHash).add(ownerPeer);
+        // Örneğin debug log:
+        System.out.println("File " + fileHash + " is owned by " + fileOwnersMap.get(fileHash));
+    }
+
+
 
     /**
      * "Found files" listesi GUI'de gösterilecek
      */
     public void updateFoundFilesInGUI() {
         SwingUtilities.invokeLater(() -> {
-            gui.clearFoundFilesList(); // Eski liste temizlenir
-            for (String fileName : knownFileNames) {
-                gui.addFileToFoundFilesList(fileName); // Yeni dosyalar GUI'ye eklenir
+            // Basit şekilde: "hash + fileName" gösterelim
+            for (int i = 0; i < knownFileHashes.size(); i++) {
+                String h = knownFileHashes.get(i);
+                String n = knownFileNames.get(i);
+                // Örnek: "n + " (" + h.substring(0,8) + ")"
+                String displayName = n + " (hash=" + h.substring(0,8) + ")";
+                gui.addFileToFoundFilesList(displayName);
             }
         });
     }
@@ -180,5 +272,22 @@ public class GeneralManager {
 
     public FileManager getFileManager() {
         return fileManager;
+    }
+
+    public int getTotalChunksForFile(String fileHash) {
+        return knownFiles.getOrDefault(fileHash, 0);
+    }
+    // Dosya adından hash'e dönüş
+    public String getFileHashByFileName(String fileName) {
+        return fileNameToHash.get(fileName);
+    }
+
+    public String getFileNameByHash(String fileHash) {
+        for (Map.Entry<String, String> entry : fileNameToHash.entrySet()) {
+            if (entry.getValue().equals(fileHash)) {
+                return entry.getKey();
+            }
+        }
+        return null;
     }
 }

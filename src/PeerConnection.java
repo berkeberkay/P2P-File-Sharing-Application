@@ -77,14 +77,27 @@ public class PeerConnection {
                 System.out.println("Peer disconnected: " + senderAddress);
             }
             case "FILE_ANNOUNCEMENT" -> {
-                // "FILE_ANNOUNCEMENT|<fileHash>|<fileName>"
-                if (parts.length < 3) {
+                // "FILE_ANNOUNCEMENT|<fileHash>|<fileName>|<totalChunks>"
+                if (parts.length < 4) {
                     System.err.println("Invalid FILE_ANNOUNCEMENT message format: " + message);
                     return;
                 }
                 String fileHash = parts[1];
                 String fileName = parts[2];
-                generalManager.saveFoundFile(fileHash, fileName);
+                int totalChunks = Integer.parseInt(parts[3]);
+                generalManager.addFileOwner(fileHash, senderAddress);
+                generalManager.saveFoundFile(fileHash, fileName, totalChunks);
+            }
+            case "EXCLUDE_MASK" -> {
+                String excludeMask = parts[1];
+                GeneralManager.addExcludeMask(excludeMask);
+                break;
+            }
+            case "EXCLUDE_FOLDER" -> {
+                // EXCLUDE_FOLDER|folderName
+                String excludeFolder = parts[1];
+                GeneralManager.addExcludeFolder(excludeFolder);
+                break;
             }
             default -> {
                 System.err.println("Unknown UDP message type received: " + message);
@@ -118,13 +131,20 @@ public class PeerConnection {
         }
     }
 
+    public void sendExcludeMessage(String type, String value, String targetPeer) {
+        String message = type + "|" + value; // Örn: EXCLUDE_MASK|.exe veya EXCLUDE_FOLDER|temp
+        sendMessage(message, targetPeer);
+    }
+
+
     /**
      * Dosya duyurusu (announce) için kullanabileceğiniz yardımcı metod.
      * "FILE_ANNOUNCEMENT|<hash>|<filename>"
      */
-    public void sendFileAnnouncement(String fileHash, String fileName, String address) {
-        sendMessage("FILE_ANNOUNCEMENT", address, fileHash, fileName);
+    public void sendFileAnnouncement(String fileHash, String fileName, String totalChunks, String peerAddress) {
+        sendMessage("FILE_ANNOUNCEMENT|" + fileHash + "|" + fileName + "|" + totalChunks, peerAddress);
     }
+
 
     public void disconnect() {
         if (socket == null || socket.isClosed()) {

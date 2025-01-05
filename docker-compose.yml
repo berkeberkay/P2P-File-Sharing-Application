@@ -25,3 +25,13 @@ services:
     networks:
       - custom-bridge-network
 
+  java-app3:
+    build: .
+    image: image
+    container_name: java-app3-container
+    restart: always
+    environment:
+      DISPLAY: 192.168.192.1:0 # Use the host's DISPLAY variable
+    networks:
+      - custom-bridge-network
+

@@ -1,7 +1,6 @@
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.security.MessageDigest;
 import java.util.*;
 
 public class FileManager {
@@ -9,6 +8,9 @@ public class FileManager {
     // "hash -> File" şeklinde tutuyoruz
     private static final Map<String, File> sharedFiles = new HashMap<>();
     private static String downloadDirectory = "downloads";
+    public static final int CHUNK_SIZE = 256 * 1024; // 256 KB
+    private final List<String> peers = new ArrayList<>();
+
 
     // İstenirse buradan HashUtils import edilerek kullanılabilir
     // import your.package.HashUtils;
@@ -27,7 +29,7 @@ public class FileManager {
     /**
      * İndirme klasörünü ayarla (destination folder).
      */
-    public static void setDownloadDirectory(String downloadDirPath) {
+    public void setDownloadDirectory(String downloadDirPath) {
         downloadDirectory = downloadDirPath;
         File downloadDir = new File(downloadDirectory);
         if (!downloadDir.exists()) {
@@ -43,7 +45,7 @@ public class FileManager {
      * Paylaşılan dosyaları yükler (hash tabanlı).
      * Aynı hash’e sahip dosya tekrar eklenmez.
      */
-    public void loadSharedFiles(String directoryPath) {
+    public void loadSharedFiles(String directoryPath, List<String> excludeMasks, List<String> excludeFolders) {
         File directory = new File(directoryPath);
         if (!directory.exists() || !directory.isDirectory()) {
             System.err.println("Invalid shared folder path: " + directoryPath);
@@ -54,24 +56,58 @@ public class FileManager {
         if (files == null) return;
 
         for (File file : files) {
-            if (file.isFile()) {
-                try {
-                    // HashUtils ile hash hesapla
-                    String fileHash = HashUtils.calculateFileHash(file.getAbsolutePath());
-                    if (!sharedFiles.containsKey(fileHash)) {
-                        // Aynı hash yoksa ekle
-                        sharedFiles.put(fileHash, file);
-                        System.out.println("Added file: " + file.getName() + " | Hash: " + fileHash);
-                    } else {
-                        System.out.println("Skipping (same hash) : " + file.getName());
-                    }
-                } catch (Exception e) {
-                    System.err.println("Error calculating hash for " + file.getName() + ": " + e.getMessage());
+            // Klasör dışlama
+            if (isExcludedFolder(file, excludeFolders)) {
+                System.out.println("Skipping folder: " + file.getName() + " due to exclusion.");
+                continue;
+            }
+
+            // Alt klasörse recursive çağırma
+            if (file.isDirectory()) {
+                loadSharedFiles(file.getAbsolutePath(), excludeMasks, excludeFolders);
+                continue;
+            }
+
+            // Dosya maskesi dışlama
+            if (isExcludedByMask(file.getName(), excludeMasks)) {
+                System.out.println("Skipping file: " + file.getName() + " due to mask exclusion.");
+                continue;
+            }
+
+            // Dosyayı hash'le ve paylaşım listesine ekle
+            try {
+                String fileHash = HashUtils.calculateFileHash(file.getAbsolutePath());
+                if (!sharedFiles.containsKey(fileHash)) {
+                    sharedFiles.put(fileHash, file);
+                    System.out.println("Added file: " + file.getName() + " | Hash: " + fileHash);
                 }
+            } catch (Exception e) {
+                System.err.println("Error calculating hash for " + file.getName() + ": " + e.getMessage());
             }
         }
-        System.out.println("Shared files loaded (by hash): " + sharedFiles.keySet());
     }
+
+    private boolean isExcludedFolder(File file, List<String> excludeFolders) {
+        if (!file.isDirectory()) return false;
+        for (String folderName : excludeFolders) {
+            if (file.getName().equalsIgnoreCase(folderName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isExcludedByMask(String fileName, List<String> excludeMasks) {
+        for (String mask : excludeMasks) {
+            if (fileName.toLowerCase().endsWith(mask.toLowerCase())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+
+
 
     /**
      * Paylaşılan dosyaları döndürür (hash seti)
@@ -83,125 +119,59 @@ public class FileManager {
     /**
      * Dosyayı hash üzerinden bulma
      */
-    public static File getFileByHash(String fileHash) {
+    static File getFileByHash(String fileHash) {
         return sharedFiles.get(fileHash);
     }
 
-    /**
-     * Klasik TCP mantığında dosya gönderen taraf (sunucu)
-     * “handleFileRequest” => “fileHash” üzerinden dosyayı bulur.
-     * chunk’ları 256 KB boyutunda gönderir, her chunk sonrası ACK bekler.
-     */
-    public static void handleFileRequest(String fileHash, String requesterIP) {
-        File file = getFileByHash(fileHash);
 
-        if (file == null || !file.exists()) {
-            System.err.println("Requested file not found (hash): " + fileHash);
-            return;
-        }
-
-        try (Socket socket = new Socket(requesterIP, 6789);
-             DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
-             DataInputStream dis = new DataInputStream(socket.getInputStream());
-             RandomAccessFile raf = new RandomAccessFile(file, "r")) {
-
-            long fileSize = file.length();
-            int CHUNK_SIZE = 256 * 1024;  // 256 KB
-            int chunkCount = (int) Math.ceil((double) fileSize / CHUNK_SIZE);
-            byte[] buffer = new byte[CHUNK_SIZE];
-
-            for (int chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
-                raf.seek((long) chunkIndex * CHUNK_SIZE);
-                int bytesRead = raf.read(buffer);
-
-                dos.writeInt(chunkIndex);       // Chunk index
-                dos.writeInt(bytesRead);        // Chunk size
-                dos.write(buffer, 0, bytesRead);
-                dos.flush();
-
-                // ACK al
-                int ack = dis.readInt();
-                if (ack != chunkIndex) {
-                    System.err.println("Error: ACK mismatch for chunk " + chunkIndex);
-                    return;
-                }
-            }
-
-            // Son chunk = -1
-            dos.writeInt(-1);
-            dos.flush();
-            System.out.println("File sent successfully: " + file.getName()
-                    + " (hash=" + fileHash + ")");
-
-        } catch (IOException e) {
-            System.err.println("Error while sending file: " + e.getMessage());
-        }
-    }
-
-    /**
-     * İsteyen taraf (istemci) “fileHash” parametresiyle
-     * chunk bazında dosyayı indirsin, GUI’de % güncellesin.
-     */
-    public void requestFile(String fileHash, String targetPeer) {
-        // “targetPeer” = dosyayı barındıran peer IP
-        // “fileHash” = hangi dosya (hash) isteniyor
+    public int requestChunk(String fileHash, int chunkIndex, String targetPeer) {
+        int downloadedBytes = -1;  // Başta -1 dönecek (hata durumu)
         try (Socket socket = new Socket(targetPeer, 6789);
              DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
-             DataInputStream dis = new DataInputStream(socket.getInputStream());
-        ) {
-            // 1) Sunucuya "FILE_REQUEST|<hash>" şeklinde mesaj yollayabiliriz.
-            //    (Protokolü siz belirliyorsunuz.)
-            dos.writeUTF("FILE_REQUEST|" + fileHash);
+             DataInputStream dis = new DataInputStream(socket.getInputStream())) {
+
+            dos.writeUTF("CHUNK_REQUEST|" + fileHash + "|" + chunkIndex);
             dos.flush();
 
-            // 2) Sunucudan dosya boyutu al
-            long totalSize = dis.readLong();
-            if (totalSize < 0) {
-                System.err.println("File not found on server (hash): " + fileHash);
-                return;
-            }
+            int chunkSize = dis.readInt();
+            if (chunkSize > 0) {
+                byte[] buffer = new byte[chunkSize];
+                dis.readFully(buffer);
 
-            // “DownloadStatus” oluştur
-            // Mesela “unknownFileHash_XXXX” isim verelim.
-            // Veya siz, sunucunun da orijinal dosyaAdı yollamasını sağlayabilirsiniz.
-            String fileName = "download_" + fileHash.substring(0, 8);
-            // “XYZ123” gibi kısaltma
-
-            DownloadStatus ds = new DownloadStatus(fileName, totalSize);
-            // %0 olarak eklemek için
-            gui.updateDownloadingFile(ds);
-
-            // 3) Dosyayı “downloadDirectory/fileName” yoluna yaz
-            try (RandomAccessFile raf = new RandomAccessFile(downloadDirectory + "/" + fileName, "rw")) {
-                while (true) {
-                    int chunkIndex = dis.readInt();
-                    if (chunkIndex == -1) {
-                        // Bitti
-                        break;
-                    }
-                    int chunkSize = dis.readInt();
-                    byte[] buffer = new byte[chunkSize];
-                    dis.readFully(buffer);
-
-                    raf.seek((long) chunkIndex * (256L * 1024));
-                    raf.write(buffer);
-
-                    // İlerleme güncelle
-                    ds.addDownloadedBytes(chunkSize);
-                    gui.updateDownloadingFile(ds);
-
-                    // ACK
-                    dos.writeInt(chunkIndex);
-                    dos.flush();
+                File chunkFile = new File(downloadDirectory, fileHash + ".part" + chunkIndex);
+                try (FileOutputStream fos = new FileOutputStream(chunkFile)) {
+                    fos.write(buffer);
                 }
-                System.out.println("File received successfully: " + fileName
-                        + " (hash=" + fileHash + ")");
+                System.out.println("Chunk " + chunkIndex + " downloaded successfully from " + targetPeer);
+                downloadedBytes = chunkSize;  // İndirilen byte sayısı
+            } else {
+                System.err.println("Failed to download chunk " + chunkIndex + " from " + targetPeer);
             }
-
         } catch (IOException e) {
-            System.err.println("Error while requesting file from " + targetPeer + ": " + e.getMessage());
+            System.err.println("Error while requesting chunk " + chunkIndex + " from " + targetPeer + ": " + e.getMessage());
+        }
+        return downloadedBytes;
+    }
+
+    public void mergeChunks(String fileHash, int totalChunks) {
+        File outputFile = new File(downloadDirectory, fileHash + "_merged");
+        try (FileOutputStream fos = new FileOutputStream(outputFile)) {
+            for (int i = 0; i < totalChunks; i++) {
+                File chunkFile = new File(downloadDirectory, fileHash + ".part" + i);
+                try (FileInputStream fis = new FileInputStream(chunkFile)) {
+                    byte[] buffer = new byte[CHUNK_SIZE];
+                    int bytesRead;
+                    while ((bytesRead = fis.read(buffer)) > 0) {
+                        fos.write(buffer, 0, bytesRead);
+                    }
+                }
+            }
+            System.out.println("File merged successfully: " + outputFile.getAbsolutePath());
+        } catch (IOException e) {
+            System.err.println("Error merging chunks: " + e.getMessage());
         }
     }
+
 
     /**
      * “isListening” bayrağı ile 2. kez 6789 portunu açmayı engelliyoruz.
@@ -251,61 +221,112 @@ public class FileManager {
         try (DataInputStream dis = new DataInputStream(clientSocket.getInputStream());
              DataOutputStream dos = new DataOutputStream(clientSocket.getOutputStream())) {
 
-            // 1) "FILE_REQUEST|<hash>" bekliyoruz
             String request = dis.readUTF();
             String[] parts = request.split("\\|");
-            if (parts.length < 2 || !"FILE_REQUEST".equals(parts[0])) {
-                System.err.println("Invalid request: " + request);
-                dos.writeLong(-1); // dosya yok
+
+            if (parts.length < 2) {
+                System.err.println("Invalid request format: " + request);
+                dos.writeInt(-1); // Geçersiz istek
                 return;
             }
+
+            String requestType = parts[0];
             String fileHash = parts[1];
-            File file = getFileByHash(fileHash);
+
+            // Dosyayı hash'e göre bul
+            File file = FileManager.getFileByHash(fileHash);
             if (file == null || !file.exists()) {
                 System.err.println("Requested file not found: " + fileHash);
-                dos.writeLong(-1);
+                dos.writeInt(-1); // Dosya bulunamadı
                 return;
             }
 
-            // 2) Dosya boyutu
-            long fileSize = file.length();
-            dos.writeLong(fileSize);
+            if ("CHUNK_REQUEST".equals(requestType)) {
+                int chunkIndex = Integer.parseInt(parts[2]);
+                int CHUNK_SIZE = 256 * 1024;
+                long offset = (long) chunkIndex * CHUNK_SIZE;
 
-            // 3) 256 KB chunk gönder
-            int CHUNK_SIZE = 256 * 1024;
-            int chunkCount = (int) Math.ceil((double) fileSize / CHUNK_SIZE);
-            byte[] buffer = new byte[CHUNK_SIZE];
-
-            try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
-                for (int chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
-                    raf.seek((long) chunkIndex * CHUNK_SIZE);
-                    int bytesRead = raf.read(buffer);
-
-                    dos.writeInt(chunkIndex);
-                    dos.writeInt(bytesRead);
-                    dos.write(buffer, 0, bytesRead);
-                    dos.flush();
-
-                    // ACK
-                    int ack = dis.readInt();
-                    if (ack != chunkIndex) {
-                        System.err.println("ACK mismatch chunk " + chunkIndex);
-                        return;
-                    }
+                if (offset >= file.length()) {
+                    System.err.println("Requested chunk index out of range: " + chunkIndex);
+                    dos.writeInt(-1);
+                    return;
                 }
-            }
-            dos.writeInt(-1);
-            System.out.println("File sent successfully: " + file.getName()
-                    + " (hash=" + fileHash + ")");
 
+                try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+                    raf.seek(offset);
+                    int bytesToRead = (int) Math.min(CHUNK_SIZE, file.length() - offset);
+                    byte[] buffer = new byte[bytesToRead];
+                    raf.readFully(buffer);
+
+                    dos.writeInt(bytesToRead);
+                    dos.write(buffer);
+                    dos.flush();
+                    System.out.println("Chunk " + chunkIndex + " sent successfully for file: " + file.getName());
+                }
+            } else {
+                dos.writeInt(-1); // Geçersiz istek
+            }
         } catch (IOException e) {
             System.err.println("Error handling client request: " + e.getMessage());
         } finally {
             try {
                 clientSocket.close();
-            } catch (IOException ignored) {}
+            } catch (IOException e) {
+                System.err.println("Error closing client socket: " + e.getMessage());
+            }
         }
     }
+
+
+
+    private void handleChunkRequest(String[] parts, File file, DataOutputStream dos) {
+        if (parts.length < 3) {
+            System.err.println("Invalid CHUNK_REQUEST format: " + String.join("|", parts));
+            try {
+                dos.writeInt(-1); // Geçersiz istek
+            } catch (IOException e) {
+                System.err.println("Error sending response: " + e.getMessage());
+            }
+            return;
+        }
+
+        try {
+            int chunkIndex = Integer.parseInt(parts[2]);
+            int CHUNK_SIZE = 256 * 1024;
+            long offset = (long) chunkIndex * CHUNK_SIZE;
+
+            if (offset >= file.length()) {
+                System.err.println("Requested chunk index out of range: " + chunkIndex);
+                dos.writeInt(-1); // Geçersiz chunk
+                return;
+            }
+
+            try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+                raf.seek(offset);
+                int bytesToRead = (int) Math.min(CHUNK_SIZE, file.length() - offset);
+                byte[] buffer = new byte[bytesToRead];
+                raf.readFully(buffer);
+
+                dos.writeInt(bytesToRead); // Chunk boyutu
+                dos.write(buffer);         // Chunk verisi
+                dos.flush();
+                System.out.println("Chunk " + chunkIndex + " sent successfully for file: " + file.getName());
+            }
+        } catch (NumberFormatException e) {
+            System.err.println("Invalid chunk index format: " + parts[2]);
+            try {
+                dos.writeInt(-1); // Hatalı chunk
+            } catch (IOException ioException) {
+                System.err.println("Error sending response: " + ioException.getMessage());
+            }
+        } catch (IOException e) {
+            System.err.println("Error processing chunk request: " + e.getMessage());
+        }
+
+    }
+
+
+
 
     // DownloadStatus iç sınıf (yüzde takibi)
     public class DownloadStatus {

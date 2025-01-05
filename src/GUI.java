@@ -46,29 +46,6 @@ public class GUI {
         JMenuItem disconnectItem = new JMenuItem("Disconnect");
         JMenuItem exitItem = new JMenuItem("Exit");
 
-        connectItem.addActionListener(e -> {
-            try {
-                generalManager.connect();
-                JOptionPane.showMessageDialog(frame, "Connected to the overlay network.");
-            } catch (Exception ex) {
-                JOptionPane.showMessageDialog(frame, "Failed to connect: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
-                ex.printStackTrace();
-            }
-        });
-
-        // "Disconnect" butonuna PeerConnection işlevi ekleme
-        disconnectItem.addActionListener(e -> {
-            try {
-                generalManager.disconnect();
-                JOptionPane.showMessageDialog(frame, "Disconnected from the overlay network.");
-            } catch (Exception ex) {
-                JOptionPane.showMessageDialog(frame, "Failed to disconnect: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
-                ex.printStackTrace();
-            }
-        });
-
-
-        exitItem.addActionListener(e -> System.exit(0));
 
         filesMenu.add(connectItem);
         filesMenu.add(disconnectItem);
@@ -228,7 +205,37 @@ public class GUI {
         frame.add(mainPanel, BorderLayout.CENTER);
         frame.add(bottomPanel, BorderLayout.SOUTH);
 
+
         // Event Handlers
+
+        connectItem.addActionListener(e -> {
+            try {
+                generalManager.connect();
+                JOptionPane.showMessageDialog(frame, "Connected to the overlay network.");
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(frame, "Failed to connect: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+                ex.printStackTrace();
+            }
+        });
+
+        // "Disconnect" butonuna PeerConnection işlevi ekleme
+        disconnectItem.addActionListener(e -> {
+            if (!generalManager.isConnected()) { // Bağlı değilse
+                JOptionPane.showMessageDialog(frame, "Please connect to the overlay network first.", "Error", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+
+            try {
+                generalManager.disconnect(); // Bağlıysa bağlantıyı kes
+                JOptionPane.showMessageDialog(frame, "Disconnected from the overlay network.");
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(frame, "Failed to disconnect: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+                ex.printStackTrace();
+            }
+        });
+
+        exitItem.addActionListener(e -> System.exit(0));
+
 
         rootTextField.addMouseListener(new MouseAdapter() {
             @Override
@@ -253,6 +260,46 @@ public class GUI {
             }
         });
 
+        addExcludeButton.addActionListener(e -> {
+            String mask = JOptionPane.showInputDialog(frame, "Enter file mask to exclude (e.g. .exe, .dat):");
+            if (mask != null && !mask.trim().isEmpty()) {
+                excludeListModel.addElement(mask.trim());
+                generalManager.addExcludeMask(mask.trim());
+                generalManager.sendExcludeMessage("EXCLUDE_MASK", mask.trim());
+            }
+        });
+
+        addFolderButton.addActionListener(e -> {
+            String folder = JOptionPane.showInputDialog(frame, "Enter folder name to exclude (e.g. temp, backup):");
+            if (folder != null && !folder.trim().isEmpty()) {
+                excludeFolderListModel.addElement(folder.trim());
+                generalManager.addExcludeFolder(folder.trim());
+                generalManager.sendExcludeMessage("EXCLUDE_FOLDER", folder.trim());
+            }
+        });
+
+        delExcludeButton.addActionListener(e -> {
+            String selectedMask = excludeList.getSelectedValue();
+            if (selectedMask != null) {
+                excludeListModel.removeElement(selectedMask);
+                generalManager.removeExcludeMask(selectedMask);
+            } else {
+                JOptionPane.showMessageDialog(frame, "Please select a mask to remove.", "Error", JOptionPane.ERROR_MESSAGE);
+            }
+        });
+
+
+        delFolderButton.addActionListener(e -> {
+            String selectedFolder = excludeFolderList.getSelectedValue();
+            if (selectedFolder != null) {
+                excludeFolderListModel.removeElement(selectedFolder);
+                generalManager.removeExcludeFolder(selectedFolder);
+            } else {
+                JOptionPane.showMessageDialog(frame, "Please select a folder to remove.", "Error", JOptionPane.ERROR_MESSAGE);
+            }
+        });
+
+
         destinationTextField.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
@@ -272,6 +319,13 @@ public class GUI {
             File f = new File(destPath);
             if (f.isDirectory()) {
                 generalManager.setDestinationFolderPath(destPath);
+                System.out.println("Destination folder set to: " + destPath);
+            } else {
+                // Hata uyarısı, geçersiz klasör
+                JOptionPane.showMessageDialog(frame,
+                        "Invalid directory. Please select a valid folder.",
+                        "Error",
+                        JOptionPane.ERROR_MESSAGE);
             }
         });
 
@@ -279,34 +333,19 @@ public class GUI {
         foundFilesList.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
-                if (e.getClickCount() == 2) { // çift tıklama
+                if (e.getClickCount() == 2) {
                     int index = foundFilesList.locationToIndex(e.getPoint());
                     if (index != -1) {
-                        String displayText = foundFilesListModel.getElementAt(index);
-                        // Örn. "deneme.txt (hash=0827a3bc8f5f...)"
-                        String extractedHash = parseHashFromDisplay(displayText);
-                        System.out.println("Downloading file (hash): " + extractedHash);
-
-                        // GeneralManager'da parametre olarak hash gönderelim
-                        generalManager.requestFile(extractedHash);
+                        String fileName = foundFilesListModel.getElementAt(index);
+                        String fileHash = generalManager.getFileHashByFileName(fileName);
+                        // Yukarıdaki map'ten buluyor
+                        int totalChunks = generalManager.getTotalChunksForFile(fileHash);
+                        generalManager.requestFile(fileHash, totalChunks);
                     }
                 }
             }
-        private String parseHashFromDisplay(String displayText) {
-            // displayText = "deneme.txt (hash=0827a3bc8f5f4dddfb...)"
-            int startIndex = displayText.indexOf("hash=") + 5; // 5 = length("hash=")
-            if (startIndex < 5) {
-                // "hash=" bulunamadı
-                return null;
-            }
-            // Parantez kapandığı yeri bulalım
-            int endIndex = displayText.indexOf(")", startIndex);
-            if (endIndex < 0) {
-                return null;
-            }
-            return displayText.substring(startIndex, endIndex).trim();
-        }
         });
+
 
 
         searchButton.addActionListener(e -> {
@@ -379,20 +418,20 @@ public class GUI {
 
     public void updateDownloadingFile(FileManager.DownloadStatus ds) {
         SwingUtilities.invokeLater(() -> {
-            // Find if ds is already in the list by name
+            boolean found = false;
             for (int i = 0; i < downloadingListModel.size(); i++) {
                 String element = downloadingListModel.getElementAt(i);
                 if (element.startsWith(ds.getFileName())) {
-                    // Update the item with the new percentage
-                    downloadingListModel.setElementAt(ds.toString(), i);
-                    return;
+                    downloadingListModel.setElementAt(ds.toString(), i); // Güncelle
+                    found = true;
+                    break;
                 }
             }
-            // If not found, add it (this covers the initial 0% case)
-            downloadingListModel.addElement(ds.toString());
+            if (!found) {
+                downloadingListModel.addElement(ds.toString()); // Yeni ekle
+            }
         });
     }
-
 
 
 }
