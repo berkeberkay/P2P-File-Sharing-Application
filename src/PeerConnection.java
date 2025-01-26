@@ -21,7 +21,6 @@ public class PeerConnection {
     }
 
     public void startFlooding() {
-        // Peer keşfi (Discovery)
         System.out.println("Starting peer discovery... Local IP : " + getLocalIPAddress());
         sendMessage("DISCOVERY_REQUEST", "255.255.255.255");
         System.out.println("Discovery request sent");
@@ -40,7 +39,6 @@ public class PeerConnection {
                 while (true) {
                     DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                     socket.receive(packet);
-
                     String message = new String(packet.getData(), 0, packet.getLength());
                     String senderAddress = packet.getAddress().getHostAddress();
 
@@ -55,7 +53,7 @@ public class PeerConnection {
     private void handleIncomingMessage(String message, String senderAddress) {
         String localIPAddress = getLocalIPAddress();
         if (localIPAddress != null && localIPAddress.equals(senderAddress)) {
-            return; // Kendi IP'sinden gelen mesajı yok say
+            return;
         }
 
         String[] parts = message.split("\\|");
@@ -63,16 +61,13 @@ public class PeerConnection {
 
         switch (messageType) {
             case "DISCOVERY_REQUEST" -> {
-                // Peer keşfi
                 generalManager.addPeer(senderAddress);
                 sendMessage("RESPONSE", senderAddress);
             }
             case "RESPONSE" -> {
-                // Peer keşfi cevabı
                 generalManager.addPeer(senderAddress);
             }
             case "DISCONNECT" -> {
-                // Peer ayrılıyor
                 generalManager.removePeer(senderAddress);
                 System.out.println("Peer disconnected: " + senderAddress);
             }
@@ -88,16 +83,19 @@ public class PeerConnection {
                 generalManager.addFileOwner(fileHash, senderAddress);
                 generalManager.saveFoundFile(fileHash, fileName, totalChunks);
             }
-            case "EXCLUDE_MASK" -> {
-                String excludeMask = parts[1];
-                GeneralManager.addExcludeMask(excludeMask);
-                break;
-            }
-            case "EXCLUDE_FOLDER" -> {
-                // EXCLUDE_FOLDER|folderName
-                String excludeFolder = parts[1];
-                GeneralManager.addExcludeFolder(excludeFolder);
-                break;
+            case "EXCLUDE_FILE" -> {
+                // EXCLUDE_FILE|<fileHash>
+                if (parts.length < 2) {
+                    System.err.println("Invalid EXCLUDE_FILE message format: " + message);
+                    return;
+                }
+                String fileHash = parts[1];
+
+                generalManager.removeFileOwner(fileHash, senderAddress);
+                if (!generalManager.isFileOwnedByAnyPeer(fileHash)) {
+                    generalManager.removeFoundFile(fileHash);
+                }
+                System.out.println("File excluded by peer " + senderAddress + " with hash " + fileHash);
             }
             default -> {
                 System.err.println("Unknown UDP message type received: " + message);
@@ -110,7 +108,6 @@ public class PeerConnection {
             System.err.println("DatagramSocket is not initialized or already closed.");
             return;
         }
-
         try {
             StringBuilder messageBuilder = new StringBuilder(messageType);
             for (String arg : args) {
@@ -132,26 +129,19 @@ public class PeerConnection {
     }
 
     public void sendExcludeMessage(String type, String value, String targetPeer) {
-        String message = type + "|" + value; // Örn: EXCLUDE_MASK|.exe veya EXCLUDE_FOLDER|temp
+        String message = type + "|" + value;
         sendMessage(message, targetPeer);
     }
 
-
-    /**
-     * Dosya duyurusu (announce) için kullanabileceğiniz yardımcı metod.
-     * "FILE_ANNOUNCEMENT|<hash>|<filename>"
-     */
     public void sendFileAnnouncement(String fileHash, String fileName, String totalChunks, String peerAddress) {
         sendMessage("FILE_ANNOUNCEMENT|" + fileHash + "|" + fileName + "|" + totalChunks, peerAddress);
     }
-
 
     public void disconnect() {
         if (socket == null || socket.isClosed()) {
             System.err.println("DatagramSocket is not initialized or already closed.");
             return;
         }
-        // Tüm peer'lara DISCONNECT
         List<String> allPeers = generalManager.peers();
         for (String peer : allPeers) {
             sendMessage("DISCONNECT", peer);

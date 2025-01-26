@@ -15,8 +15,6 @@ public class HashUtils {
                 digest.update(buffer, 0, bytesRead);
             }
         }
-
-        // Hash'i hex formatında döndür
         StringBuilder hexString = new StringBuilder();
         for (byte b : digest.digest()) {
             hexString.append(String.format("%02x", b));

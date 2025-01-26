@@ -7,40 +7,29 @@ public class GeneralManager {
     private final GUI gui;
     private final PeerConnection peerConnection;
     private final FileManager fileManager;
-
-    // Paylaşılan klasör, hedef klasör (indirilecek dosyaların gideceği yer)
     private String sharedFolderPath;
     private String destinationFolderPath;
-
-    // Peer listesi ve bilinen (duyurulan) dosyaların listesi
-    private final List<String> peers = new ArrayList<>();
-    private final List<String> knownFileHashes = new ArrayList<>();
-    private final List<String> knownFileNames = new ArrayList<>();
+    private final List<String> peers = new ArrayList<>();   // birbirini bilen peerlar
     private final Map<String, Integer> knownFiles = new HashMap<>();
-    // Dosyayı kimler paylaşıyor: fileHash -> Set of peer addresses
-    private final Map<String, Set<String>> fileOwnersMap = new HashMap<>();
+    private final Map<String, Set<String>> fileOwnersMap = new HashMap<>();  // dosya hashi ve sahipleri
     private final Map<String, String> fileNameToHash = new HashMap<>();
     private static final List<String> excludeMasks = new ArrayList<>();
     private static final List<String> excludeFolders = new ArrayList<>();
+    private String checkboxExclusionFlag = "false"; // başlangıçta false olmalı guiden kontrol ediliyor
+
 
     public GeneralManager(GUI gui) {
         this.gui = gui;
-        // 1) UDP discovery için PeerConnection
         this.peerConnection = new PeerConnection(this);
-        // 2) TCP file manager
         this.fileManager = new FileManager();
-        // GUI'yi fileManager'a set et
         this.fileManager.setGUI(gui);
     }
 
-    // ---------------------------
-    // Peer Bağlantı (UDP) Yönetimi
-    // ---------------------------
     public void connect() {
         new Thread(() -> {
             peerConnection.startFlooding();
             peerConnection.startListening();
-            startFileRequestListener(); // TCP sunucu (port 6789)
+            startFileRequestListener(); // sunucu dinlemeye başlar
         }).start();
     }
 
@@ -49,8 +38,9 @@ public class GeneralManager {
             peerConnection.disconnect();
         }).start();
     }
+
     public boolean isConnected() {
-        return !peers.isEmpty(); // Peer listesi boş değilse bağlıdır
+        return !peers.isEmpty();
     }
 
     public void addPeer(String senderAddress) {
@@ -65,25 +55,47 @@ public class GeneralManager {
         System.out.println("Peer removed: " + senderAddress);
     }
 
-    public List<String> peers() {
-        return peers;
-    }
 
-    // ---------------------------
-    // File Request Listener (TCP)
-    // ---------------------------
     public void startFileRequestListener() {
         fileManager.startListeningForRequests();
     }
 
-    // ---------------------------
-    // Paylaşılan Dosyaları Yükleme & Duyurma
-    // ---------------------------
-    public GeneralManager sharedFolderPath(String path) {
+    // burdaki no usage ancak kullanılıyor.Burayı çöz
+    public void sharedFolderPath(String path) throws Exception{
+        addSubFoldersToExcludeList(path);
         this.sharedFolderPath = path;
         fileManager.loadSharedFiles(path, excludeMasks, excludeFolders);
         announceFiles();
-        return this;
+        addSubFoldersToExcludeList(path);
+    }
+
+    private void addSubFoldersToExcludeList(String path) {
+        File folder = new File(path);
+        File[] files = folder.listFiles();
+        if (files == null) return;
+
+        for (File file : files) {
+            if (file.isDirectory()) {
+                excludeFolders.add(file.getAbsolutePath());
+                addSubFoldersToExcludeList(file.getAbsolutePath());
+            }
+        }
+        updateExcludedFolderList();
+    }
+
+    private void updateExcludedFolderList() {
+        SwingUtilities.invokeLater(() -> {
+            this.gui.clearExcludedFolderList();
+
+            for (String folderPath : excludeFolders) {
+                File folder = new File(folderPath);
+                if (folder.exists() && folder.isDirectory()) {
+                    String folderName = folder.getName();
+                    this.gui.addFolderToExcludedFolderList(folderName);
+                    System.out.println("DEBUG: Excluded folder added to GUI: " + folderName);
+                }
+            }
+        });
     }
 
     public void sendExcludeMessage(String type, String value) {
@@ -92,14 +104,16 @@ public class GeneralManager {
         }
     }
 
-    public static void addExcludeMask(String mask) {
+    public void addExcludeMask(String mask) {
         if (!excludeMasks.contains(mask)) {
             excludeMasks.add(mask);
         }
+        this.updateFoundFilesInGUI();
     }
 
     public void removeExcludeMask(String mask) {
         excludeMasks.remove(mask);
+        updateFoundFilesInGUI();
     }
 
     public static void addExcludeFolder(String folder) {
@@ -112,10 +126,7 @@ public class GeneralManager {
         excludeFolders.remove(folder);
     }
 
-    /**
-     * Tüm peers'e paylaşılan dosyaları duyurmak için
-     * (fileHash, fileName) -> FILE_ANNOUNCEMENT|<hash>|<filename>
-     */
+
     public void announceFiles() {
         if (sharedFolderPath == null || sharedFolderPath.isEmpty()) {
             System.err.println("Shared folder path is not set.");
@@ -127,51 +138,66 @@ public class GeneralManager {
             return;
         }
 
-        for (String fileHash : fileManager.getSharedFiles()) {
-            File file = fileManager.getFileByHash(fileHash);
-            if (file != null && file.exists()) {
-                String fileName = file.getName();
-                long fileSize = file.length();
-                System.out.println("DEBUG: " + fileName + " size: " + fileSize + " bytes.");
+        File sharedFolder = new File(sharedFolderPath);
+        if (!sharedFolder.exists() || !sharedFolder.isDirectory()) {
+            System.err.println("Invalid shared folder path: " + sharedFolderPath);
+            return;
+        }
 
-                // CHUNK_SIZE = 256 * 1024 (256 KB) olduğunu varsayıyoruz.
-                int totalChunks = (int) Math.ceil((double) fileSize / FileManager.CHUNK_SIZE);
-                System.out.println("DEBUG: totalChunks = " + totalChunks);
+        File[] files = sharedFolder.listFiles();
+        if (files == null) return;
 
-                // "FILE_ANNOUNCEMENT|hash|filename|totalChunks"
-                for (String peer : peers) {
-                    peerConnection.sendFileAnnouncement(
-                            fileHash,
-                            fileName,
-                            String.valueOf(totalChunks),
-                            peer
-                    );
+        // yanlışsa sadece root doğruysa alt klasörlerdeki dosyaları paylaş
+        if (checkboxExclusionFlag.equals("true")) {
+            // Sadece root klasördeki dosyaları paylaş
+            for (String fileHash : fileManager.getSharedFiles()) {
+                File file = fileManager.getFileByHash(fileHash);
+                if (file != null && file.getParentFile().equals(sharedFolder)) {
+                    announceFile(fileHash, file);
                 }
-            } else {
-                System.err.println("File with hash " + fileHash + " is null or not found on disk.");
+            }
+        } else {
+            for (String fileHash : fileManager.getSharedFiles()) {
+                File file = fileManager.getFileByHash(fileHash);
+                if (file != null) {
+                    File parentFolder = file.getParentFile();
+                    if (parentFolder.equals(sharedFolder) || parentFolder.getParentFile().equals(sharedFolder)) {
+                        announceFile(fileHash, file);
+                    }
+                }
             }
         }
     }
 
+    private void announceFile(String fileHash, File file) {
+        try {
+            String fileName = file.getName();
+            long fileSize = file.length();
+            int totalChunks = (int) Math.ceil((double) fileSize / FileManager.CHUNK_SIZE);
+            System.out.println("totalChunks = " + totalChunks);
+
+            // bütün peerlara dosya duyurusu yap
+            for (String peer : peers) {
+                peerConnection.sendFileAnnouncement(
+                        fileHash,
+                        fileName,
+                        String.valueOf(totalChunks),
+                        peer
+                );
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to announce file: " + file.getName() + " - " + e.getMessage());
+        }
+    }
 
 
-
-    // ---------------------------
-    // Destination Folder (indirilecek dosyalar)
-    // ---------------------------
     public void setDestinationFolderPath(String destinationPath) {
         this.destinationFolderPath = destinationPath;
         fileManager.setDownloadDirectory(destinationPath);
     }
 
-    // ---------------------------
-    // Dosya İndirme (TCP)
-    // ---------------------------
-    /**
-     * GUI'den çift tıklamada: "requestFile(hash, targetPeer)"
-     */
+
     public void requestFile(String fileHash, int totalChunks) {
-        // 1) Bu dosyayı paylaşan peer'ları bul
         Set<String> owners = fileOwnersMap.get(fileHash);
         if (owners == null || owners.isEmpty()) {
             System.err.println("No peers own this file: " + fileHash);
@@ -180,17 +206,14 @@ public class GeneralManager {
 
         List<String> ownersList = new ArrayList<>(owners);
         String fileName = getFileNameByHash(fileHash);
-        // Artık round-robin'i ownersList üzerinde yapacağız, "peers" değil.
-
-        // 2) DownloadStatus ve benzeri GUI hazırlığı...
         long totalSize = (long) totalChunks * FileManager.CHUNK_SIZE;
         FileManager.DownloadStatus ds = fileManager.new DownloadStatus(fileName + "_merged", totalSize);
         gui.updateDownloadingFile(ds);
 
-        // 3) Thread’ler veya basit for döngüsü
+        // toplam chunk sayısı kadar thread oluştur
         List<Thread> downloadThreads = new ArrayList<>();
         for (int chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-            // Round-robin: chunkIndex'e göre ownersList seç
+            // rr algoritması ile peer seç
             String targetPeer = ownersList.get(chunkIndex % ownersList.size());
             int finalChunkIndex = chunkIndex;
 
@@ -204,8 +227,7 @@ public class GeneralManager {
             downloadThreads.add(downloadThread);
             downloadThread.start();
         }
-
-        // 4) Join
+        // threadleri bitir. burası birleştirme işlemi
         for (Thread thread : downloadThreads) {
             try {
                 thread.join();
@@ -213,71 +235,125 @@ public class GeneralManager {
                 e.printStackTrace();
             }
         }
-        // 5) mergeChunks
         fileManager.mergeChunks(fileHash, totalChunks);
     }
 
 
-
-
-
-
-    // ---------------------------
-    // Found Files Kaydı (GUI'ye ekleme)
-    // ---------------------------
-    /**
-     * "FILE_ANNOUNCEMENT|<fileHash>|<fileName>" mesajını alınca çağrılır
-     */
     public void saveFoundFile(String fileHash, String fileName, int totalChunks) {
         knownFiles.put(fileHash, totalChunks);
-        fileNameToHash.put(fileName, fileHash); // dosya adından hash'e gidelim
+        fileNameToHash.put(fileName, fileHash);
         gui.addFileToFoundFilesList(fileName);
     }
 
     public void addFileOwner(String fileHash, String ownerPeer) {
         fileOwnersMap.putIfAbsent(fileHash, new HashSet<>());
         fileOwnersMap.get(fileHash).add(ownerPeer);
-        // Örneğin debug log:
-        System.out.println("File " + fileHash + " is owned by " + fileOwnersMap.get(fileHash));
     }
 
 
-
-    /**
-     * "Found files" listesi GUI'de gösterilecek
-     */
     public void updateFoundFilesInGUI() {
         SwingUtilities.invokeLater(() -> {
-            // Basit şekilde: "hash + fileName" gösterelim
-            for (int i = 0; i < knownFileHashes.size(); i++) {
-                String h = knownFileHashes.get(i);
-                String n = knownFileNames.get(i);
-                // Örnek: "n + " (" + h.substring(0,8) + ")"
-                String displayName = n + " (hash=" + h.substring(0,8) + ")";
-                gui.addFileToFoundFilesList(displayName);
+            this.gui.clearFoundFilesList();
+
+            for (Map.Entry<String, String> entry : this.fileNameToHash.entrySet()) {
+                String fileName = entry.getKey();
+
+                // Mask kontrolü
+                boolean isMasked = false;
+                for (String mask : excludeMasks) {
+                    if (fileName.endsWith(mask)) {
+                        isMasked = true;
+                        break;
+                    }
+                }
+                // Eğer maskelenmemişse GUI'ye ekle
+                if (!isMasked) {
+                    gui.addFileToFoundFilesList(fileName);
+                }
             }
         });
     }
 
-    // ---------------------------
-    // Getters
-    // ---------------------------
-    public String getSharedFolderPath() {
-        return sharedFolderPath;
+    public void excludeFilesUnderFolder(String folderPath) {
+        File folder = new File(folderPath);
+        if (!folder.exists() || !folder.isDirectory()) {
+            System.err.println("Invalid folder path: " + folderPath);
+            return;
+        }
+
+        File[] files = folder.listFiles();
+        if (files == null) return;
+
+        for (File file : files) {
+            if (file.isFile()) {
+                String fileHash = fileNameToHash.get(file.getName());
+                if (fileHash != null) {
+                    // Diğer peer'lara dosyayı paylaşmayı durdurduğunu bildir
+                    for (String peer : peers) {
+                        peerConnection.sendExcludeMessage("EXCLUDE_FILE", fileHash, peer);
+                    }
+                    System.out.println("Excluded file from folder: " + file.getName() + " (hash=" + fileHash + ")");
+                }
+            }
+        }
     }
 
-    public String getDestinationFolderPath() {
-        return destinationFolderPath;
+    public void reannounceFilesUnderFolder(String folderPath) {
+        File folder = new File(folderPath);
+        if (!folder.exists() || !folder.isDirectory()) {
+            System.err.println("Invalid folder path: " + folderPath);
+            return;
+        }
+
+        File[] files = folder.listFiles();
+        if (files == null) return;
+
+        for (File file : files) {
+            if (file.isFile()) {
+                String fileHash = fileNameToHash.get(file.getName());
+                if (fileHash != null) {
+                    long fileSize = file.length();
+                    int totalChunks = (int) Math.ceil((double) fileSize / FileManager.CHUNK_SIZE);
+
+                    // Diğer peer'lara dosyayı yeniden duyur
+                    for (String peer : peers) {
+                        peerConnection.sendFileAnnouncement(fileHash, file.getName(), String.valueOf(totalChunks), peer);
+                    }
+                    System.out.println("Reannounced file from folder: " + file.getName() + " (hash=" + fileHash + ")");
+                }
+            }
+        }
     }
 
-    public FileManager getFileManager() {
-        return fileManager;
+    public void removeFileOwner(String fileHash, String ownerPeer) {
+        if (fileOwnersMap.containsKey(fileHash)) {
+            fileOwnersMap.get(fileHash).remove(ownerPeer);
+            if (fileOwnersMap.get(fileHash).isEmpty()) {
+                fileOwnersMap.remove(fileHash);
+            }
+        }
     }
+    public boolean isFileOwnedByAnyPeer(String fileHash) {
+        return fileOwnersMap.containsKey(fileHash) && !fileOwnersMap.get(fileHash).isEmpty();
+    }
+
+    public void removeFoundFile(String fileHash) {
+        String fileName = getFileNameByHash(fileHash);
+        if (fileName != null) {
+            fileNameToHash.remove(fileName);
+            knownFiles.remove(fileHash);
+            gui.removeFileFromFoundFilesList(fileName);
+            System.out.println("File removed from found files: " + fileName);
+        }
+    }
+
+
+    // GET SET METHODS
 
     public int getTotalChunksForFile(String fileHash) {
         return knownFiles.getOrDefault(fileHash, 0);
     }
-    // Dosya adından hash'e dönüş
+
     public String getFileHashByFileName(String fileName) {
         return fileNameToHash.get(fileName);
     }
@@ -289,5 +365,14 @@ public class GeneralManager {
             }
         }
         return null;
+    }
+
+    public void setCheckNewFilesOnly(boolean selected) {
+        this.checkboxExclusionFlag = selected ? "true" : "false";
+    }
+
+
+    public List<String> peers() {
+        return peers;
     }
 }

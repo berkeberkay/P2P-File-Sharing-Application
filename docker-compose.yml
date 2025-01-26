@@ -11,7 +11,7 @@ services:
     container_name: java-app-container
     restart: always
     environment:
-      DISPLAY: 192.168.192.1:0  # Use the host's DISPLAY variable
+      DISPLAY: 192.168.192.1:0
     networks:
       - custom-bridge-network
 
@@ -21,7 +21,7 @@ services:
     container_name: java-app2-container
     restart: always
     environment:
-      DISPLAY: 192.168.192.1:0 # Use the host's DISPLAY variable
+      DISPLAY: 192.168.192.1:0
     networks:
       - custom-bridge-network
 
@@ -31,7 +31,7 @@ services:
     container_name: java-app3-container
     restart: always
     environment:
-      DISPLAY: 192.168.192.1:0 # Use the host's DISPLAY variable
+      DISPLAY: 192.168.192.1:0
     networks:
       - custom-bridge-network
 

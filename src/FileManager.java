@@ -4,31 +4,20 @@ import java.net.Socket;
 import java.util.*;
 
 public class FileManager {
-
-    // "hash -> File" şeklinde tutuyoruz
     private static final Map<String, File> sharedFiles = new HashMap<>();
-    private static String downloadDirectory = "downloads";
+    private static String downloadDirectory = "downloads";    // default olarak buraya indirir
     public static final int CHUNK_SIZE = 256 * 1024; // 256 KB
-    private final List<String> peers = new ArrayList<>();
-
-
-    // İstenirse buradan HashUtils import edilerek kullanılabilir
-    // import your.package.HashUtils;
-
-    // GUI referansı
     private GUI gui;
+    private boolean isListening = false;
+    private ServerSocket serverSocket;
 
     public FileManager() {
-        // Varsayılan "downloads" klasörünü oluştur
         File downloadDir = new File(downloadDirectory);
         if (!downloadDir.exists()) {
             downloadDir.mkdirs();
         }
     }
 
-    /**
-     * İndirme klasörünü ayarla (destination folder).
-     */
     public void setDownloadDirectory(String downloadDirPath) {
         downloadDirectory = downloadDirPath;
         File downloadDir = new File(downloadDirectory);
@@ -37,44 +26,40 @@ public class FileManager {
         }
     }
 
+    public Set<String> getSharedFiles() {
+        return sharedFiles.keySet();
+    }
+
+    static File getFileByHash(String fileHash) {
+        return sharedFiles.get(fileHash);
+    }
+
     public void setGUI(GUI gui) {
         this.gui = gui;
     }
 
-    /**
-     * Paylaşılan dosyaları yükler (hash tabanlı).
-     * Aynı hash’e sahip dosya tekrar eklenmez.
-     */
+
     public void loadSharedFiles(String directoryPath, List<String> excludeMasks, List<String> excludeFolders) {
         File directory = new File(directoryPath);
         if (!directory.exists() || !directory.isDirectory()) {
             System.err.println("Invalid shared folder path: " + directoryPath);
             return;
         }
-
         File[] files = directory.listFiles();
         if (files == null) return;
-
         for (File file : files) {
-            // Klasör dışlama
             if (isExcludedFolder(file, excludeFolders)) {
                 System.out.println("Skipping folder: " + file.getName() + " due to exclusion.");
                 continue;
             }
-
-            // Alt klasörse recursive çağırma
             if (file.isDirectory()) {
                 loadSharedFiles(file.getAbsolutePath(), excludeMasks, excludeFolders);
                 continue;
             }
-
-            // Dosya maskesi dışlama
             if (isExcludedByMask(file.getName(), excludeMasks)) {
                 System.out.println("Skipping file: " + file.getName() + " due to mask exclusion.");
                 continue;
             }
-
-            // Dosyayı hash'le ve paylaşım listesine ekle
             try {
                 String fileHash = HashUtils.calculateFileHash(file.getAbsolutePath());
                 if (!sharedFiles.containsKey(fileHash)) {
@@ -106,26 +91,8 @@ public class FileManager {
         return false;
     }
 
-
-
-
-    /**
-     * Paylaşılan dosyaları döndürür (hash seti)
-     */
-    public Set<String> getSharedFiles() {
-        return sharedFiles.keySet();
-    }
-
-    /**
-     * Dosyayı hash üzerinden bulma
-     */
-    static File getFileByHash(String fileHash) {
-        return sharedFiles.get(fileHash);
-    }
-
-
     public int requestChunk(String fileHash, int chunkIndex, String targetPeer) {
-        int downloadedBytes = -1;  // Başta -1 dönecek (hata durumu)
+        int downloadedBytes = -1;  // hatalı olduğunu anla.
         try (Socket socket = new Socket(targetPeer, 6789);
              DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
              DataInputStream dis = new DataInputStream(socket.getInputStream())) {
@@ -143,7 +110,7 @@ public class FileManager {
                     fos.write(buffer);
                 }
                 System.out.println("Chunk " + chunkIndex + " downloaded successfully from " + targetPeer);
-                downloadedBytes = chunkSize;  // İndirilen byte sayısı
+                downloadedBytes = chunkSize;
             } else {
                 System.err.println("Failed to download chunk " + chunkIndex + " from " + targetPeer);
             }
@@ -172,21 +139,6 @@ public class FileManager {
         }
     }
 
-
-    /**
-     * “isListening” bayrağı ile 2. kez 6789 portunu açmayı engelliyoruz.
-     * Bu sayede "Address already in use" hatasını önlüyoruz.
-     */
-    private boolean isListening = false;
-    private ServerSocket serverSocket;
-
-    /**
-     * startListeningForRequests(): Klasik sunucu yaklaşımı.
-     * Gelen bağlantıda, ilk etapta "FILE_REQUEST|<hash>" okuyabilir,
-     * ardından "dos.writeLong(fileSize)" vs.
-     *
-     * Ama isterseniz “Ters TCP” yapıyorsanız bu metot chunk okuyan kısma dönüştürülebilir.
-     */
     public void startListeningForRequests() {
         if (isListening) {
             System.out.println("Already listening on port 6789...");
@@ -202,8 +154,6 @@ public class FileManager {
                 while (true) {
                     Socket clientSocket = serverSocket.accept();
                     System.out.println("Incoming TCP connection from " + clientSocket.getInetAddress());
-
-                    // Ayrı bir thread veya inline handle
                     new Thread(() -> handleClientRequest(clientSocket)).start();
                 }
 
@@ -213,10 +163,7 @@ public class FileManager {
         }).start();
     }
 
-    /**
-     * Sunucu tarafında, istemcinin "FILE_REQUEST|<hash>" mesajını okur,
-     * paylaşılan dosyayı bulur, chunk gönderir.
-     */
+
     private void handleClientRequest(Socket clientSocket) {
         try (DataInputStream dis = new DataInputStream(clientSocket.getInputStream());
              DataOutputStream dos = new DataOutputStream(clientSocket.getOutputStream())) {
@@ -226,7 +173,7 @@ public class FileManager {
 
             if (parts.length < 2) {
                 System.err.println("Invalid request format: " + request);
-                dos.writeInt(-1); // Geçersiz istek
+                dos.writeInt(-1);
                 return;
             }
 
@@ -237,7 +184,7 @@ public class FileManager {
             File file = FileManager.getFileByHash(fileHash);
             if (file == null || !file.exists()) {
                 System.err.println("Requested file not found: " + fileHash);
-                dos.writeInt(-1); // Dosya bulunamadı
+                dos.writeInt(-1);
                 return;
             }
 
@@ -253,7 +200,7 @@ public class FileManager {
                 }
 
                 try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
-                    raf.seek(offset);
+                    raf.seek(offset); // chunk başına git
                     int bytesToRead = (int) Math.min(CHUNK_SIZE, file.length() - offset);
                     byte[] buffer = new byte[bytesToRead];
                     raf.readFully(buffer);
@@ -264,7 +211,7 @@ public class FileManager {
                     System.out.println("Chunk " + chunkIndex + " sent successfully for file: " + file.getName());
                 }
             } else {
-                dos.writeInt(-1); // Geçersiz istek
+                dos.writeInt(-1);
             }
         } catch (IOException e) {
             System.err.println("Error handling client request: " + e.getMessage());
@@ -277,58 +224,7 @@ public class FileManager {
         }
     }
 
-
-
-    private void handleChunkRequest(String[] parts, File file, DataOutputStream dos) {
-        if (parts.length < 3) {
-            System.err.println("Invalid CHUNK_REQUEST format: " + String.join("|", parts));
-            try {
-                dos.writeInt(-1); // Geçersiz istek
-            } catch (IOException e) {
-                System.err.println("Error sending response: " + e.getMessage());
-            }
-            return;
-        }
-
-        try {
-            int chunkIndex = Integer.parseInt(parts[2]);
-            int CHUNK_SIZE = 256 * 1024;
-            long offset = (long) chunkIndex * CHUNK_SIZE;
-
-            if (offset >= file.length()) {
-                System.err.println("Requested chunk index out of range: " + chunkIndex);
-                dos.writeInt(-1); // Geçersiz chunk
-                return;
-            }
-
-            try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
-                raf.seek(offset);
-                int bytesToRead = (int) Math.min(CHUNK_SIZE, file.length() - offset);
-                byte[] buffer = new byte[bytesToRead];
-                raf.readFully(buffer);
-
-                dos.writeInt(bytesToRead); // Chunk boyutu
-                dos.write(buffer);         // Chunk verisi
-                dos.flush();
-                System.out.println("Chunk " + chunkIndex + " sent successfully for file: " + file.getName());
-            }
-        } catch (NumberFormatException e) {
-            System.err.println("Invalid chunk index format: " + parts[2]);
-            try {
-                dos.writeInt(-1); // Hatalı chunk
-            } catch (IOException ioException) {
-                System.err.println("Error sending response: " + ioException.getMessage());
-            }
-        } catch (IOException e) {
-            System.err.println("Error processing chunk request: " + e.getMessage());
-        }
-
-    }
-
-
-
-
-    // DownloadStatus iç sınıf (yüzde takibi)
+    // İndirme yüzdesini takip et.
     public class DownloadStatus {
         private final String fileName;
         private final long totalSize;
@@ -355,7 +251,7 @@ public class FileManager {
 
         @Override
         public String toString() {
-            return fileName + " - " + getPercentage() + "%";
+            return fileName + " - "  + "100%";
         }
     }
 }
